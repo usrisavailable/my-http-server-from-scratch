@@ -5,6 +5,7 @@
 
 #include <sys/epoll.h>
 #include <memory>
+#include <functional>
 
 namespace Reactor{
     /**this class control the reactor instance
@@ -36,17 +37,18 @@ namespace Reactor{
          * @param fd is the resource need to monitor
          * @ret -1 on failed, and other on success
          */
-        int Add(int fd);
+        int Add(int fd, struct epoll_event ev);
         /**this method is a wrapper of epoll_ctl
          * @param fd is the resource need to monitor
          * @ret -1 on failed, and other on success
          */
         int Del(int fd);
-        /**this method is a wrapper of epoll_wati
+        /**this method is a wrapper of epoll_wait
          * for now, evnet handler is not ready, maybe in other class 
+         * @param evnetNum is pass by reference
          * @ret -1 on failed, and other on success
          */
-        int Wait(int servfd);
+        struct epoll_event* Wait(int& evnetNum);
     private:
         struct ReactorData;
         std::unique_ptr< ReactorData > impl;
