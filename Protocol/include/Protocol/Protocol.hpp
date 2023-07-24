@@ -6,6 +6,8 @@
 
 #include <memory>
 
+#include <Reactor/Reactor.hpp>
+
 namespace Protocol{
     /**this class used to define the server
      * behaviors and creation and destroy
@@ -49,8 +51,56 @@ namespace Protocol{
          * for now, call close() directly
          */
         int Close();
+        /**this method do real work
+         * this will do now, later think about other way
+         * @param epollEventArray is returned by wait, and eventNum is all event occured
+         */
+        void PerformTask(struct epoll_event* epollEventArray, int eventNum);
     private:
         struct server;
         std::unique_ptr< struct server > impl;
+    };
+
+    /**we need create a connection pool
+     * it is used to bind a fd and its behavior
+     * not need a new a module
+     * besides, a fd should be assoicated wiht a Connection object.
+     */
+    //class Connection;
+    //using callbackFn = std::function< void(Connection*) >;
+    class Connection{
+    public:
+        /**life cycle mangement
+         * though all member is public
+         * @ret none, just perform none-staitc member initialization
+         */
+        Connection();
+        ~Connection();
+    public:
+        Connection(const Connection&) = default;
+        Connection& operator=(const Connection&) = default;
+        Connection(const Connection&&) = delete;
+        Connection& operator=(const Connection&&) = delete;
+    public:
+        /**a sign used to distinguish server socket and client socket
+         * class user need to pass the serverfd(no better way?)
+         * @param file descriptor need to judgement
+         * @ret server for ture, otherwise false
+         */
+        bool IsServer(int fd);
+    public:
+        //the remote file descriptor
+        int fd;
+        //to observe the connection, wether or not expired
+        //so, we do not consider the value of fd
+        int status;
+        //reserve a Reactor object
+        std::shared_ptr< Reactor::Reactor > reactor;
+        //function object is better than function pointer
+        //may be a better way???
+        //it appears so weird, ???
+        virtual int AcceptRemoteClient(std::array< Connection*, 1024>& connPool);
+        virtual int ReadFromRemoteClient();
+        virtual int WriteToRemoteClient();
     };
 }
