@@ -23,7 +23,10 @@
 #include <atomic>
 
 #include <Protocol/Protocol.hpp>
-#include <Reactor/Reactor.hpp>
+#include <Protocol/Http.hpp>
+
+#define log(fmt, ...) \
+    fprintf(stderr, "line%d: " fmt "\n", __LINE__, __VA_ARGS__)
 
 namespace Protocol{
     //useless data statistics
@@ -32,12 +35,20 @@ namespace Protocol{
     struct Protocol::server {
         int servfd;
         std::string port;
-        Reactor::Reactor reactor;   //defaul initialization
+        std::shared_ptr< Reactor::Reactor > reactor;   //default initialization
+        std::array< Connection*, 1024> connPool;
     };
     Protocol::Protocol(const std::string port):
         impl(new server)
     {
         impl->port = port;
+        impl->reactor = std::make_shared< Reactor::Reactor >();
+        for (int n = 0; n < impl->connPool.size(); n++)
+        {   
+            //every Connection object should have a Reactor object
+            impl->connPool[n] = new Connection();
+            impl->connPool[n]->reactor = impl->reactor->data();
+        }
     }
     Protocol::~Protocol()
     {
@@ -133,11 +144,22 @@ namespace Protocol{
     int Protocol::ConnectionService()
     {
         int ret;
-        ret = impl->reactor.Init();
+        ret = impl->reactor->Init();
         if (ret == -1)
             return -1;
-
-        if (-1 == impl->reactor.Add(impl->servfd))
+        //bind serverfd and connection object
+        Connection *conn;
+        {
+            for (auto& iter : impl->connPool)
+                if (!iter->status)
+                    {conn = iter; break;}
+        }
+        conn->fd = impl->servfd;
+        conn->status = 1;
+        struct epoll_event ev;
+        ev.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP;
+        ev.data.ptr = conn;
+        if (-1 == impl->reactor->Add(impl->servfd, ev))
             return -1;
         return 0;
     }
@@ -147,28 +169,165 @@ namespace Protocol{
         //for now ,we created thread dynamically
         //especially, only one thread can call epoll_wait at a time
         //this method has many problems
-
-        int ret = impl->reactor.Wait(impl->servfd);\
-        switch (ret)
+        struct epoll_event* epollEventArray;
+        int eventNum = 0;
+        epollEventArray = impl->reactor->Wait(eventNum);
+        switch (eventNum)
         {
-        case 0/* constant-expression */:
+        case 0 /* constant-expression */:
             /* code */
             //std::cerr << "wait time out, recall it later" << std::endl;
             break;
         case -1:
-            perror("system call failed: ");
+            perror("system call wait failed: ");
             this->Close();
             exit(-1);
         default:
+            this->PerformTask(epollEventArray, eventNum);
             break;
         }
         return true;
     }
-    
+    void Protocol::PerformTask(struct epoll_event* epollEventArray, int eventNum)
+    {
+        int n = 0;
+        Connection *conn = nullptr;
+        int event;
+        std::cerr << "the total event is: " << eventNum << std::endl;
+        for (n; n < eventNum; n++)
+        {
+            conn = static_cast< Connection* >(epollEventArray[n].data.ptr);
+            event = epollEventArray[n].events;
+            std::cerr << "fd is: " << conn->fd << std::endl;
+            std::cerr << "status is: " << conn->status << std::endl;
+            if (conn->IsServer(impl->servfd))
+            {
+                conn->AcceptRemoteClient(impl->connPool);
+            }
+            else
+            {
+                //std::thread t;
+                //now, we just use main thread
+                if (event & EPOLLIN)
+                    std::cerr << "EPOLLIN" << std::endl;
+                if (event & EPOLLOUT)
+                    std::cerr << "EPOLLOUT" << std::endl;
+                if (event & EPOLLRDHUP)
+                    std::cerr << "EPOLLRDHUP" << std::endl;
+                conn->WriteToRemoteClient();
+                //for static service, we need to collect resource
+                //if (event & EPOLLRDHUP)
+                {
+                      impl->reactor->Del(conn->fd);
+                      //std::cerr << impl->reactor.use_count() << std::endl;
+                      close(conn->fd);
+                      conn->status = 0;
+                      conn->fd = -1;
+                }
+            }
+        }
+        return;
+    }
+
     int Protocol::Close()
     {
         //clear connetcion
         close(impl->servfd);
+        //some data object use new operator
+        for (auto& iter : impl->connPool)
+            delete iter;
+        return 0;
+    }
+
+    //class Connetcion defined bleow
+    Connection::Connection():
+        fd(-1), status(0)
+    {
+    }
+    Connection::~Connection()
+    {}
+    bool Connection::IsServer(int fd)
+    {
+        if (this->fd == fd)
+            return true;
+        return false;
+    }
+    //read and write callback function initialization
+    int Connection::AcceptRemoteClient(std::array< Connection*, 1024>& connPool)
+    {
+        int remoteFd;
+        Connection *conn = nullptr;
+        struct epoll_event ev;
+        ev.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP;
+        while ((remoteFd = accept(this->fd, NULL, NULL)) > 0) {
+            conn = nullptr;
+            for(auto& iter : connPool)
+            {
+                if (!iter->status)
+                    {conn = iter; break;}
+            }
+            if (conn == nullptr)
+            {
+                std::cerr << "connection poll is full, later try" << std::endl;
+                return -1;
+            }
+            conn->fd = remoteFd;
+            conn->status = 1;
+
+            ev.data.ptr = conn;
+            std::cerr << "the remote fd is:" << remoteFd << std::endl;
+            this->reactor->Add(remoteFd, ev);
+        }
+        return 0;
+    }
+    int Connection::WriteToRemoteClient()
+    {
+        //now we provide two types of services
+        //buffer for receive data delivered by client
+        std::string buf;
+        buf.resize(8192);
+        recv(this->fd, const_cast<char *>(buf.data()), buf.size(), 0);
+        //std::cout << buf << std::endl;
+
+        //we need to get the request URI
+        std::string separatorOne = "/";
+        std::string separatorTwo = " ";
+        std::string reqContent;
+        //std::string::iterator iter = reqContent.begin();
+        std::string::size_type currPos = 0;
+        std::string::size_type endPos = std::string::npos;
+        {
+            currPos = buf.find(separatorOne);
+            ++currPos;
+            endPos = buf.find(separatorTwo, currPos);
+            //this way is useless
+            /* iter += currPos;
+            int len = 0;
+            while (!isspace(*iter))
+            {
+                len++;
+                iter++;
+            } */
+            reqContent = buf.substr(currPos, endPos - currPos);
+            //std::cout << "the URI is:" << reqContent << std::endl;
+            // std::this_thread::sleep_for(std::chrono::milliseconds(800));
+            // exit(1);
+        }
+        //initialize and register all types services
+        std::map< std::string, std::function< void(int) > > servicesMap;
+        servicesMap["image"] = Http::ImageService;
+        servicesMap["time"] = Http::TimeService;
+        servicesMap["notfind"] = Http::DefaultService;
+        
+        if (servicesMap.find(reqContent) != servicesMap.end())
+            servicesMap[reqContent](this->fd);
+        else
+            servicesMap["notfind"](this->fd);
+        
+        return 0;
+    }
+    int Connection::ReadFromRemoteClient()
+    {
         return 0;
     }
 
