@@ -13,7 +13,7 @@ static void
 TimeHandler(int sig)
 {
     cout << "time to terminate the process" << endl;
-    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(5000));
     run = true;
     //kill(getpid(), SIGTERM);
     return;
@@ -21,8 +21,7 @@ TimeHandler(int sig)
 int main(int argc, char *argv[])
 {
     pid_t pid = getpgid(0);
-    cout << "the current id of process is:" << endl;
-    cout << pid << endl;
+    cout << "the current id of process is:" << pid << endl;
     {
         //use a timer to terminate the process
         struct sigaction sa;
@@ -45,7 +44,7 @@ int main(int argc, char *argv[])
     }
     
     string port;
-    if (argc > 2)
+    if (argc == 2)
         port = string(argv[1]);
     else
         port = "80";
