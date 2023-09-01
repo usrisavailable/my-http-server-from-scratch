@@ -21,9 +21,11 @@
 #include <iostream>
 #include <mutex>
 #include <atomic>
+#include <cassert>
 
 #include <Protocol/Protocol.hpp>
 #include <Protocol/Http.hpp>
+#include <Protocol/Comm.hpp>
 
 #define log(fmt, ...) \
     fprintf(stderr, "line%d: " fmt "\n", __LINE__, __VA_ARGS__)
@@ -46,7 +48,7 @@ namespace Protocol{
         for (int n = 0; n < impl->connPool.size(); n++)
         {   
             //every Connection object should have a Reactor object
-            impl->connPool[n] = new Connection();
+            impl->connPool[n] = new ConnectionEcho();
             impl->connPool[n]->reactor = impl->reactor->data();
         }
     }
@@ -83,7 +85,7 @@ namespace Protocol{
             if (-1 == sigaction(SIGPIPE, &sa, NULL))
                 return -1;
         }
-       
+        this->run = true;
         return 0;
         
     }
@@ -157,7 +159,8 @@ namespace Protocol{
         conn->fd = impl->servfd;
         conn->status = 1;
         struct epoll_event ev;
-        ev.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP;
+        //ev.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP;
+        ev.events = EPOLLIN;
         ev.data.ptr = conn;
         if (-1 == impl->reactor->Add(impl->servfd, ev))
             return -1;
@@ -193,39 +196,52 @@ namespace Protocol{
         int n = 0;
         Connection *conn = nullptr;
         int event;
-        std::cerr << "the total event is: " << eventNum << std::endl;
+        //std::cerr << "the total event is: " << eventNum << std::endl;
         for (n; n < eventNum; n++)
         {
             conn = static_cast< Connection* >(epollEventArray[n].data.ptr);
             event = epollEventArray[n].events;
-            std::cerr << "fd is: " << conn->fd << std::endl;
-            std::cerr << "status is: " << conn->status << std::endl;
+            // std::cerr << "fd is: " << conn->fd << std::endl;
+            // std::cerr << "status is: " << conn->status << std::endl;
             if (conn->IsServer(impl->servfd))
             {
-                conn->AcceptRemoteClient(impl->connPool);
+                std::thread t(&Connection::AcceptRemoteClient, std::ref(conn), std::ref(impl->connPool));
+                t.join();
+                //conn->AcceptRemoteClient(impl->connPool);
             }
             else
             {
                 //std::thread t;
                 //now, we just use main thread
-                if (event & EPOLLIN)
-                    std::cerr << "EPOLLIN" << std::endl;
-                if (event & EPOLLOUT)
-                    std::cerr << "EPOLLOUT" << std::endl;
-                if (event & EPOLLRDHUP)
-                    std::cerr << "EPOLLRDHUP" << std::endl;
-                conn->WriteToRemoteClient();
+                // if (event & EPOLLIN)
+                //     std::cerr << "EPOLLIN" << std::endl;
+                // if (event & EPOLLOUT)
+                //     std::cerr << "EPOLLOUT" << std::endl;
+                // if (event & EPOLLRDHUP)
+                //     std::cerr << "EPOLLRDHUP" << std::endl;
                 //for static service, we need to collect resource
-                //if (event & EPOLLRDHUP)
+                if (event & EPOLLRDHUP)
                 {
-                      impl->reactor->Del(conn->fd);
-                      //std::cerr << impl->reactor.use_count() << std::endl;
-                      close(conn->fd);
-                      conn->status = 0;
-                      conn->fd = -1;
+                       impl->reactor->Del(conn->fd);
+                       //std::cerr << impl->reactor.use_count() << std::endl;
+                       close(conn->fd);
+                       conn->status = 0;
+                       conn->fd = -1;
+                       continue;
                 }
+                //std::thread t(&Connection::ReadFromRemoteClient, std::ref(conn));
+                std::thread t(&Connection::ReadFromRemoteClient, conn);
+                //wait for sub thread return
+                //t.join();
+                //but if we detach the sub thread, we must sleep for some time or thread corrupt
+                //the reason is that the adress of conn is invalid, because its lifecycle just here
+                //so, thread must copy its value ,not the reference
+                t.detach();
+                //std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                //conn->WriteToRemoteClient();
             }
         }
+        this->run = true;
         return;
     }
 
@@ -258,8 +274,13 @@ namespace Protocol{
         int remoteFd;
         Connection *conn = nullptr;
         struct epoll_event ev;
-        ev.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP;
+        //ev.events = EPOLLIN | EPOLLOUT | EPOLLRDHUP;
+        //using EPOLLONESHOT trigger event once, include ET and LT
+        //ev.events = EPOLLOUT | EPOLLET | EPOLLONESHOT;
+        ev.events = EPOLLOUT | EPOLLRDHUP | EPOLLONESHOT;
         while ((remoteFd = accept(this->fd, NULL, NULL)) > 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            break;
             conn = nullptr;
             for(auto& iter : connPool)
             {
@@ -275,7 +296,7 @@ namespace Protocol{
             conn->status = 1;
 
             ev.data.ptr = conn;
-            std::cerr << "the remote fd is:" << remoteFd << std::endl;
+            //std::cerr << "the remote fd is:" << remoteFd << std::endl;
             this->reactor->Add(remoteFd, ev);
         }
         return 0;
@@ -323,6 +344,16 @@ namespace Protocol{
             servicesMap[reqContent](this->fd);
         else
             servicesMap["notfind"](this->fd);
+
+        std::cerr << std::this_thread::get_id() << std::endl;
+        //collect resource 
+        {
+                    this->reactor->Del(this->fd);
+                    std::cerr << this->reactor.use_count() << std::endl;
+                    close(this->fd);
+                    this->status = 0;
+                    this->fd = -1;
+        }
         
         return 0;
     }
@@ -331,4 +362,44 @@ namespace Protocol{
         return 0;
     }
 
+    ConnectionEcho::ConnectionEcho():
+        Connection()
+    {}
+    ConnectionEcho::~ConnectionEcho()
+    {}
+    int ConnectionEcho::WriteToRemoteClient()
+    {
+        std::string replyData = "ACK";
+        unsigned int ret = 0;
+        ret = Comm::SendAll(this->fd, reinterpret_cast<void *>(const_cast<char*>(replyData.c_str())), replyData.size(), 0);
+        if (ret == -1)
+            assert(false);
+        return ret;
+    }
+    int ConnectionEcho::ReadFromRemoteClient()
+    {
+        Comm::SessionMsg sessionMessage = {0, 0};
+        int ret = 0;
+        ret = Comm::RecvAll(this->fd, &sessionMessage, sizeof(sessionMessage), 0);
+         if (ret == -1)
+            assert(false);
+        ret = this->WriteToRemoteClient();
+        sessionMessage.number = ntohl(sessionMessage.number);
+        sessionMessage.length = ntohl(sessionMessage.length);
+        Comm::PayloadMsg *payloadMessage = static_cast<Comm::PayloadMsg*>(malloc(sizeof(int32_t) + sessionMessage.length));
+        std::string data;
+        while(sessionMessage.number){
+            std::cout <<"loop: " << sessionMessage.number << std::endl;
+            ret = Comm::RecvAll(this->fd, static_cast<void*>(payloadMessage), (sizeof(int32_t) + sessionMessage.length), 0);
+            payloadMessage->length = ntohl(payloadMessage->length);
+            if (ret == -1)
+            assert(false);
+            data.append(std::string(payloadMessage->data));
+            sessionMessage.number--;
+            this->WriteToRemoteClient();
+        }
+        std::cerr << "the total size is: ";
+        std::cout << data.size() << "Byte" << std::endl;
+        return 0;
+    }
 }
