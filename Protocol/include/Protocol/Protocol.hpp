@@ -56,7 +56,13 @@ namespace Protocol{
          * @param epollEventArray is returned by wait, and eventNum is all event occured
          */
         void PerformTask(struct epoll_event* epollEventArray, int eventNum);
+        //for now, it is useless
+        void IsRun(bool flag)
+        {
+            this->run = flag;
+        }
     private:
+        std::atomic_bool run;
         struct server;
         std::unique_ptr< struct server > impl;
     };
@@ -75,7 +81,7 @@ namespace Protocol{
          * @ret none, just perform none-staitc member initialization
          */
         Connection();
-        ~Connection();
+        virtual ~Connection();
     public:
         Connection(const Connection&) = default;
         Connection& operator=(const Connection&) = default;
@@ -99,8 +105,52 @@ namespace Protocol{
         //function object is better than function pointer
         //may be a better way???
         //it appears so weird, ???
+        /**this method accept a remote connection
+         * @param connPoll is a connection poll that contain all connected connection
+         * @ret 0 for sucess and -1 for error
+         */
         virtual int AcceptRemoteClient(std::array< Connection*, 1024>& connPool);
-        virtual int ReadFromRemoteClient();
+        /**this method just as its name implies
+         * how it works depennd on what the service can do
+         * @ret 
+         */
+        virtual int ReadFromRemoteClient() ;
+        /**this method just as its name implies
+         * how it works depennd on what the service can do
+         * @ret 
+         */
         virtual int WriteToRemoteClient();
+    };
+    //we still follow composition over in inheritance
+    class ConnectionEcho : public Connection{
+    public:
+        /**life cycle mangement
+         * though all member is public
+         * @ret none, just perform none-staitc member initialization
+         */
+        ConnectionEcho();
+        virtual ~ConnectionEcho();
+    public:
+        ConnectionEcho(const ConnectionEcho&) = default;
+        ConnectionEcho& operator=(const ConnectionEcho&) = default;
+        ConnectionEcho(const ConnectionEcho&&) = delete;
+        ConnectionEcho& operator=(const ConnectionEcho&&) = delete;
+    public:
+        //for echo service, two methods are enough
+        /**this method just as its name implies
+         * how it works depennd on what the service can do
+         * @ret 
+         */
+        virtual int ReadFromRemoteClient() override;
+        /**this method just as its name implies
+         * how it works depennd on what the service can do
+         * @ret 
+         */
+        virtual int WriteToRemoteClient() override;
+        /**echo service
+         * receive session message first and then receive payload message
+         * @ret 0 for success or -1 for fail
+         */
+        int EchoRDWR();
     };
 }
